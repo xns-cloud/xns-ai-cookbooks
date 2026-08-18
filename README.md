@@ -1,17 +1,22 @@
 # XNS AI Cookbooks
 
 Working recipes for AI pipelines on [XNS](https://xns.tech) — S3-compatible
-storage where reads cost nothing.
+storage with no per-read charge.
 
 Every time a RAG pipeline re-reads a corpus, a training job pulls a checkpoint,
-or an agent fetches a shared artifact, that read is free. These recipes target
-the workflows where that changes the economics.
+or an agent fetches a shared artifact, the storage side of that read is free —
+compute and model API costs are yours as usual. These recipes target the
+workflows where repeated reads dominate the storage bill.
+
+Each recipe states its limitations explicitly. These are starter recipes —
+single-process, happy-path — and each one says exactly where that stops
+being enough.
 
 ## Recipes
 
 | Recipe | Pipeline | Status |
 |--------|----------|--------|
-| [Multimodal RAG](multimodal-rag/) | Audio/video → Whisper → embeddings → cached in XNS → query | Ready |
+| [Transcript RAG](transcript-rag/) | Audio/video speech → transcripts + embeddings cached in XNS → query | Ready |
 | Agentic Document Parsing | PDFs/spreadsheets → MCP-driven extraction loops | Coming soon |
 | Fine-Tune Checkpointing | Model weights ↔ GPU clusters via S3 multipart | Coming soon |
 | Agent Workspace | CrewAI/AutoGen shared-disk pattern | Coming soon |
