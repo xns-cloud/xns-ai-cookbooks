@@ -3,8 +3,8 @@
 Transcribe media files stored in XNS, embed the transcriptions, and query them
 with natural language.
 
-The pipeline reads audio and video from an XNS bucket, runs them through
-OpenAI's Whisper, chunks the text, embeds it, and caches the embeddings back
+The pipeline reads audio and video from an XNS bucket, transcribes them
+with OpenAI, chunks the text, embeds it, and caches the embeddings back
 in XNS.  Every read from the bucket — the original media and the cached
 vectors — is unmetered.  So you can re-run the pipeline with a different
 chunking strategy, a new embedding model, or against a growing corpus, without
@@ -21,7 +21,7 @@ paying to move the data again.
              │  streams each object
              ▼
     ┌──────────────────┐
-    │   Whisper API    │  transcribes audio track
+    │  Transcription   │  gpt-4o-mini-transcribe
     │   (OpenAI)       │
     └────────┬─────────┘
              │
@@ -48,7 +48,7 @@ paying to move the data again.
              │
              ▼
     ┌──────────────────┐
-    │  gpt-4o-mini     │  answers from the
+    │  gpt-4.1-mini    │  answers from the
     │  (ChatOpenAI)    │  retrieved context
     └──────────────────┘
 ```
@@ -59,14 +59,14 @@ A typical multimodal RAG pipeline reads the same raw media multiple times:
 once for transcription, once for speaker diarization, once when you retune
 your chunking, again when you upgrade the embedding model.  On egress-billed
 storage, each pass is a line item.  On XNS, those reads are zero — the only
-costs are compute (Whisper, embeddings, LLM) and storage capacity.
+costs are compute (transcription, embeddings, LLM) and storage capacity.
 
 ## Prerequisites
 
 1. **A running XNS Relayer** with `~/.xns/credentials` written.
    See the [repo-level prerequisites](../README.md#prerequisites).
 
-2. **An OpenAI API key** — Whisper, embeddings, and the chat model all use it.
+2. **An OpenAI API key** — transcription, embeddings, and the chat model all use it.
 
 3. **Media in a bucket** — upload some `.mp3`, `.wav`, `.m4a`, or `.mp4` files.
    For a quick test, any short audio clip works:
@@ -132,9 +132,9 @@ The MCP server handles its own auth via OIDC.  It also writes
   `text-embedding-3-large` and re-run.  The old cache keys won't collide
   (they're namespaced), and re-reading the media from XNS is free.
 
-- **Add speaker diarization.** Process the same audio through a diarization
-  model, then join the speaker labels with the Whisper transcript before
-  chunking.  Same source files, another free read.
+- **Add speaker diarization.** Use `gpt-4o-transcribe-diarize` on the same
+  audio, then join the speaker labels with the transcript before chunking.
+  Same source files, another free read.
 
 - **Scale to a corpus.** Point the script at a bucket with hundreds of
   recordings.  `XNSBlobLoader` streams and never loads the full listing

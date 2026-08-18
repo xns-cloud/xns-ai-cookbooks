@@ -39,13 +39,13 @@ def main():
         print("Upload some audio or video first, then re-run.")
         sys.exit(1)
 
-    # 2. Transcribe with Whisper
+    # 2. Transcribe
 
-    whisper = OpenAI()
+    client = OpenAI()
     transcripts = []
     for blob in blobs:
-        result = whisper.audio.transcriptions.create(
-            model="whisper-1",
+        result = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
             file=(Path(blob.path).name, blob.as_bytes()),
         )
         transcripts.append(result.text)
@@ -76,7 +76,7 @@ def main():
     docs = index.similarity_search(question, k=3)
     context = "\n\n---\n\n".join(d.page_content for d in docs)
 
-    answer = ChatOpenAI(model="gpt-4o-mini").invoke(
+    answer = ChatOpenAI(model="gpt-4.1-mini").invoke(
         f"Answer based only on this transcription:\n\n{context}\n\nQuestion: {question}"
     )
     print(f"\nQ: {question}")
