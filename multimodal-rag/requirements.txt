@@ -1,0 +1,7 @@
+langchain-xns>=0.1.0
+langchain-openai>=0.3
+langchain-classic>=0.3
+langchain-text-splitters>=0.3
+langchain-community>=0.3
+faiss-cpu>=1.8
+openai>=1.0
