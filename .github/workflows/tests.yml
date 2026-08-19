@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  agentic-doc-parsing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Docling is stubbed by the tests, so its (heavy) dependency tree is
+      # deliberately not installed here.
+      - name: Install test dependencies
+        run: pip install langchain-xns openai pydantic
+
+      - name: Offline tests
+        working-directory: agentic-doc-parsing
+        run: python test_pipeline.py

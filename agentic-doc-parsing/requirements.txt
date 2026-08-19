@@ -1,0 +1,4 @@
+langchain-xns>=0.1.0
+docling==2.120.3
+openai>=1.68
+pydantic>=2.7

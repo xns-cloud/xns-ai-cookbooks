@@ -17,7 +17,7 @@ being enough.
 | Recipe | Pipeline | Status |
 |--------|----------|--------|
 | [Multimodal RAG](multimodal-rag/) | Video speech + frames → transcripts + vision captions cached in XNS → query | Ready |
-| Agentic Document Parsing | PDFs/spreadsheets → MCP-driven extraction loops | Coming soon |
+| [Agentic Document Parsing](agentic-doc-parsing/) | PDFs/spreadsheets → local Docling parse → structured JSON, cached per document | Ready |
 | Fine-Tune Checkpointing | Model weights ↔ GPU clusters via S3 multipart | Coming soon |
 | Agent Workspace | CrewAI/AutoGen shared-disk pattern | Coming soon |
 
