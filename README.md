@@ -18,7 +18,7 @@ being enough.
 |--------|----------|--------|
 | [Multimodal RAG](multimodal-rag/) | Video speech + frames → transcripts + vision captions cached in XNS → query | Ready |
 | [Agentic Document Parsing](agentic-doc-parsing/) | PDFs/spreadsheets → local Docling parse → structured JSON, cached per document | Ready |
-| Fine-Tune Checkpointing | Model weights ↔ GPU clusters via S3 multipart | Coming soon |
+| [Fine-Tune Checkpointing](finetune-checkpointing/) | Model weights ↔ GPU clusters via S3 multipart | Ready |
 | Agent Workspace | CrewAI/AutoGen shared-disk pattern | Coming soon |
 
 Each recipe includes three things:
