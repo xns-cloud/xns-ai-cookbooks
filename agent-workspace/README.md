@@ -1,4 +1,4 @@
-# Agent Workspace — share artifacts across CrewAI workers
+# Agent Workspace: shared S3-compatible artifact storage for CrewAI
 
 This recipe uses an XNS S3-compatible bucket as a shared workspace for a
 small CrewAI pipeline. One agent writes a research brief to
@@ -16,6 +16,7 @@ can reach the endpoint and hold appropriate credentials.
 
 ```yaml
 recipe:
+  schema_version: 1
   name: agent-workspace
   purpose: Exchange artifacts between agents through an S3-compatible bucket
   framework: CrewAI 1.15.16
@@ -35,9 +36,16 @@ recipe:
     - XNS_ENDPOINT
     - XNS_ACCESS_KEY_ID
     - XNS_SECRET_ACCESS_KEY
-    - OPENAI_API_KEY
-  guarantees:
+    - OPENAI_API_KEY   # the default model is OpenAI's; another provider needs its own key
+  optional_environment:
+    - CREW_MODEL             # default gpt-4.1-mini
+    - XNS_WORKSPACE_BUCKET   # default crew-workspace
+  contract:
     - Artifact handoff uses object keys rather than embedding artifacts in prompts
+  concurrency:
+    model: prefix ownership
+    rule: One worker owns each writable prefix
+    conflict_behavior: Last write wins when workers write the same key
   non_goals:
     - POSIX filesystem semantics
     - locking or atomic coordination
@@ -48,12 +56,13 @@ recipe:
 ## Architecture
 
 ```
-   worker A (process, container, or machine)   worker B — same endpoint and keys
-   ┌─────────────────────────┐                 ┌─────────────────────────┐
-   │  Researcher agent       │                 │  Reporter agent         │
-   │  writes work/brief.md   │                 │  reads  work/brief.md   │
-   │                         │                 │  writes outputs/report  │
-   └───────────┬─────────────┘                 └───────────┬─────────────┘
+   worker A                        worker B — same endpoint, credentials,
+   (process, container, machine)                and artifact contract
+   ┌─────────────────────────┐     ┌────────────────────────────┐
+   │  Researcher agent       │     │  Reporter agent            │
+   │  writes work/brief.md   │ ──▶ │  reads  work/brief.md      │
+   │                         │ key │  writes outputs/report.md  │
+   └───────────┬─────────────┘     └───────────┬────────────────┘
                │  workspace tools (boto3 + endpoint_url)   │
                ▼                                           ▼
    ┌───────────────────────────────────────────────────────────┐
@@ -72,11 +81,11 @@ bus, a lock manager, or a workflow-state store.
 Each prefix has exactly one writer. That convention is the concurrency
 model — there is nothing else enforcing it.
 
-| Handoff pattern | Artifact through the LLM context | Survives the worker's container |
+| Handoff pattern | Artifact through the LLM context | Survives termination of one worker container |
 |---|---|---|
 | Paste the artifact into the next prompt | Full text, every hop | Yes, but long artifacts get truncated |
 | Local-file tool | Key only | No — files stay on that worker's disk |
-| Shared bucket | Key only | Yes |
+| Shared bucket | Key only | Yes, subject to bucket retention and access configuration |
 
 Local-file tools are fine for single-worker runs, but their files are not
 automatically available to workers running elsewhere and can disappear
@@ -91,9 +100,11 @@ LLM inference and context use remain separate from storage transfer.
    [repo-level prerequisites](../README.md#prerequisites).
 2. `pip install -r requirements.txt` — CrewAI and boto3, pinned to the
    versions this recipe was tested against.
-3. An LLM API key. The example defaults to a model you configure via
-   `CREW_MODEL`; choose one appropriate for your latency, quality, and
-   data-handling requirements.
+3. An LLM API key. The example defaults to `gpt-4.1-mini` and therefore
+   reads `OPENAI_API_KEY`. Point `CREW_MODEL` at a different model — CrewAI
+   resolves providers through LiteLLM — and supply that provider's own
+   credential instead. Choose a model appropriate for your latency,
+   quality, and data-handling requirements.
 
 ## Quickstart
 
@@ -110,17 +121,37 @@ python crew.py "your topic here"             # the two-agent pipeline
 ```
 
 `--selftest` exercises write, read, list, missing-key handling, and a
-presigned download against your gateway without spending a token. Run it
+presigned download against your gateway without spending a token. It
+writes only under a dedicated `_selftest/` prefix and removes its objects
+before returning, so it never disturbs `work/` or `outputs/`. Run it
 first; if it fails, the problem is configuration, not the crew.
 
-Retrieve the result:
+The script attempts to create the bucket if it does not exist, so the
+configured credentials must permit bucket creation — or create it ahead of
+time and grant only object access.
+
+## Retrieve or hand off outputs
+
+The pipeline writes final artifacts under `outputs/`. A person, a
+downstream job, or another agent retrieves `outputs/report.md` through the
+same S3-compatible endpoint:
 
 ```bash
-aws s3 cp s3://crew-workspace/outputs/report.md - --endpoint-url $XNS_ENDPOINT
+aws s3 cp "s3://${XNS_WORKSPACE_BUCKET:-crew-workspace}/outputs/report.md" - \
+  --endpoint-url "$XNS_ENDPOINT"
 ```
 
-The bucket is created if it does not exist. Override its name with
-`XNS_WORKSPACE_BUCKET`.
+The AWS CLI is optional — it is one convenient client. The equivalent in
+Python, using the same client the recipe builds:
+
+```python
+from crew import Workspace
+print(Workspace().read("outputs/report.md"))
+```
+
+For a consumer that should not hold long-lived credentials, hand over a
+short-lived presigned URL instead (`Workspace().share_link(key, seconds)`),
+built with the explicit SigV4 configuration described below.
 
 ## How the handoff works
 
@@ -149,10 +180,13 @@ appeared in the reporter's prompt.
 ### Why these tools instead of the stock ones
 
 `crewai_tools` ships `S3WriterTool` and `S3ReaderTool`, but both construct
-their boto3 client without an `endpoint_url` (verified by reading the
-installed source in crewai-tools 1.15.16), so they can only address AWS.
-The workspace tools here are about thirty lines and take an endpoint,
-which is all any S3-compatible gateway needs.
+their boto3 client without an `endpoint_url` — see
+[`crewai_tools/aws/s3/writer_tool.py`](https://github.com/crewAIInc/crewAI-tools/blob/main/crewai_tools/aws/s3/writer_tool.py),
+where the client is built from `CREW_AWS_REGION` and the two `CREW_AWS_*`
+key variables and nothing else. So the stock tools do not expose the
+endpoint configuration this gateway requires. The workspace tools here are
+about thirty lines and take an endpoint, which is all any S3-compatible
+gateway needs.
 
 **Framework portability:** the storage pattern is framework-independent —
 write an artifact to a known object key, pass the key plus its expected
@@ -176,10 +210,12 @@ boto3.client("s3", endpoint_url=..., region_name="us-east-1",
                            s3={"addressing_style": "path"}))
 ```
 
-**The signer is not optional for presigned URLs.** botocore still presigns
-with SigV2 by default, and this gateway is SigV4-only, so a presigned URL
-from a default client returns **403 AccessDenied**. The error names access,
-so it reads like a credential problem when it is a signing-version
+**The signer is not optional for presigned URLs.** In the boto3/botocore
+version tested for this recipe (1.43.74), a client created without an
+explicit SigV4 configuration produced a SigV2-style presigned URL — query
+parameters `AWSAccessKeyId`, `Signature`, `Expires`. Because this gateway
+accepts SigV4, that URL returned **403 AccessDenied**. The error names
+access, so it reads like a credential problem when it is a signing-version
 problem. Setting `signature_version="s3v4"` fixes it. Ordinary `get_object`
 and `put_object` calls already sign SigV4 and are unaffected.
 

@@ -9,8 +9,9 @@ key; the bucket carries the payload.
 
 The workspace tools exist because `crewai_tools`' stock S3WriterTool and
 S3ReaderTool construct their boto3 client without an `endpoint_url`
-(verified in crewai-tools 1.15.16), so they can only reach AWS. These
-tools take an endpoint, which is all a third-party S3 gateway needs.
+(crewai-tools 1.15.16), so they do not expose the endpoint configuration
+this gateway needs. These tools take an endpoint, which is all any
+S3-compatible gateway requires.
 
 Key layout — each prefix has one owner:
 
@@ -24,6 +25,7 @@ Usage:
     python crew.py "your topic here"
 
     python crew.py --selftest      # workspace tools only, no LLM calls
+                                   # (writes and removes _selftest/ only)
 
 Credentials resolve from ~/.xns/credentials, or from XNS_ENDPOINT /
 XNS_ACCESS_KEY_ID / XNS_SECRET_ACCESS_KEY.
@@ -229,9 +231,14 @@ def build_crew(topic: str, workspace: Workspace) -> Crew:
 
 
 def selftest(workspace: Workspace) -> None:
-    """Exercise the workspace against the real gateway. No LLM involved."""
+    """Exercise the workspace against the real gateway. No LLM involved.
+
+    Everything it writes goes under its own `_selftest/` prefix and is
+    removed before it returns, so a connectivity check never disturbs
+    `work/` or `outputs/`.
+    """
     workspace.ensure_bucket()
-    probe = "work/_selftest.md"
+    probe = "_selftest/probe.md"
     body = "# selftest\nwritten by crew.py --selftest\n"
 
     print(workspace.write(probe, body))
@@ -239,11 +246,11 @@ def selftest(workspace: Workspace) -> None:
     assert got == body, f"read back {got!r}, expected {body!r}"
     print(f"read back {len(got)} bytes, identical")
 
-    keys = workspace.list("work/")
+    keys = workspace.list("_selftest/")
     assert probe in keys, f"{probe} missing from listing {keys}"
-    print(f"listed work/ — {len(keys)} key(s), probe present")
+    print(f"listed _selftest/ — {len(keys)} key(s), probe present")
 
-    missing = workspace.read("work/does-not-exist.md")
+    missing = workspace.read("_selftest/does-not-exist.md")
     assert missing.startswith("ERROR:"), missing
     print(f"missing key handled: {missing.split(':')[0]}:{missing.split(':')[1]}")
 
@@ -255,6 +262,7 @@ def selftest(workspace: Workspace) -> None:
     print("presigned GET works and returns the same bytes")
 
     workspace.s3.delete_object(Bucket=workspace.bucket, Key=probe)
+    print("cleaned up _selftest/ — work/ and outputs/ untouched")
     print("\nselftest passed — workspace is reachable and behaves as documented")
 
 
