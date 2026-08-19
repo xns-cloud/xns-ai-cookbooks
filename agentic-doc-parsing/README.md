@@ -4,8 +4,8 @@ Turn a bucket of documents into structured records an agent can query,
 and re-run it every night without paying to read the corpus again.
 
 Each document is parsed locally by [Docling](https://github.com/docling-project/docling)
-into Markdown, then turned into a JSON record by a model using structured
-outputs. **Raw document bytes never leave the host** — only the parsed
+into Markdown, then turned into a JSON record by an OpenAI model using
+structured outputs. **Raw document bytes never leave the host** — only the parsed
 text and the extraction prompt are sent to the model API. Every stage is
 cached in the bucket under a fingerprint of everything that can change
 its output, so an unchanged corpus makes no model calls at all.
@@ -27,10 +27,11 @@ enough.
            ▼
     ┌──────────────────────┐                ┌─────────────────────┐
     │  Docling  (LOCAL)    │───────────────▶│  XNS caches         │
-    │  PDF/XLSX/DOCX/PPTX  │◀───────────────│  cache/parsed/      │
-    │  → Markdown          │  key: source + │  cache/extracted/   │
-    └──────┬───────────────┘  ETag + parser └─────────────────────┘
-           │                                  cache hit = no work
+    │  PDF / XLSX          │◀───────────────│  cache/parsed/      │
+    │  → Markdown          │  key: source,  │  cache/extracted/   │
+    └──────┬───────────────┘  version, and  └─────────────────────┘
+           │                  parser/config   cache hit = no work
+           │                  fingerprint
            ▼
     ┌──────────────────────┐
     │  gpt-4.1-mini        │  structured outputs, Pydantic schema
@@ -67,12 +68,50 @@ Its envelope carries the record plus the provenance needed to trust it:
 `schema_version`, `prompt_version`, `created`, and `pipeline_warnings`.
 
 A later run skips the write only when those fingerprints still match. The
-artifact is written in a single PUT, so a reader sees either the previous
-artifact or the new one — never a partially written file.
+pipeline writes a complete artifact in one PUT rather than streaming an
+update into place; overwrite-then-read behaved correctly on the gateway
+used during development, but verify overwrite-read semantics for your own
+deployment before depending on it.
 
 Downstream agents should read `extracted/`, check `pipeline_warnings` and
 the record's own `warnings`, and use `source_key` plus each item's
 `source_ref` to go back to the original when a value matters.
+
+A real artifact, trimmed, from a spreadsheet of invoices:
+
+```json
+{
+  "source_key": "q2-invoices.xlsx",
+  "source_etag": "25c4d57a118d2e3c731b453c3859d1fc",
+  "parse_fingerprint": "9fb9aa63102fc316d8207902c3c9d0ce",
+  "extract_fingerprint": "3967778cbc6fe2310da0ab55631f444d",
+  "parser": "docling 2.120.3 (default-converter)",
+  "extraction_model": "gpt-4.1-mini",
+  "schema_version": "1",
+  "prompt_version": "1",
+  "created": "2026-08-19T12:52:46.622279+00:00",
+  "pipeline_warnings": [],
+  "extraction": {
+    "title": "Invoice Summary and Related Notes",
+    "doc_type": "Invoice Table and Notes",
+    "key_facts": [
+      {
+        "statement": "Invoice INV-2026-043 from Fabrikam GmbH is disputed and was escalated to legal on 2026-06-14.",
+        "source_ref": "Note below table"
+      }
+    ],
+    "entities": ["Northwind Robotics", "Contoso Analytics", "Fabrikam GmbH"],
+    "amounts": [
+      {"as_written": "18400", "currency": "USD", "source_ref": "Invoice Table"},
+      {"as_written": "31900", "currency": "EUR", "source_ref": "Invoice Table"}
+    ],
+    "warnings": []
+  }
+}
+```
+
+Those `source_ref` values are what let an agent — or a person — go back and
+check a number instead of trusting it.
 
 ### What the caches actually save
 
@@ -85,9 +124,8 @@ the record's own `warnings`, and use `source_key` plus each item's
 | One document (new ETag) | That file | That file | $0 |
 | Add 50 documents | Those files | Those files | $0 |
 
-"$0" is the storage side: XNS applies no per-read charge to this access
-pattern, so cache lookups and full-corpus re-reads are free. Compute,
-capacity, and model API usage are still yours.
+The storage column reflects XNS's no-per-read-charge model for this access
+pattern; compute, capacity, and model API usage are still yours.
 
 Note the asymmetry with a transcription pipeline: here the parse stage is
 local CPU, not a metered API. The parse cache buys wall-clock, not money.
@@ -100,7 +138,8 @@ The extraction cache is the one that avoids spend.
 
 2. **An OpenAI API key** — the extraction stage uses it. Parsing does not.
 
-3. **Documents in a bucket** — `.pdf`, `.xlsx`, `.docx`, `.pptx`:
+3. **Documents in a bucket** — `.pdf` and `.xlsx`. Docling reads more
+   formats than that; these are the two this recipe documents and tests:
 
    ```bash
    # AWS CLI pointed at your Relayer
@@ -122,7 +161,11 @@ python pipeline.py documents
 ```
 
 First run parses, extracts, caches, and writes one artifact per document.
-Re-run and every stage reports a cache hit; no model calls are made.
+Re-run and every stage reports a cache hit.
+
+You can prove no model calls happen on a cached re-run: set
+`OPENAI_API_KEY` to a deliberately invalid value and run it again. It
+completes normally, because nothing asks the API for anything.
 
 The pieces that decide correctness — cache-key derivation, section
 splitting, merging, artifact naming, retry bounds — have offline tests
@@ -144,6 +187,9 @@ Because every stage is keyed by a fingerprint of its inputs, the script is
 idempotent: run it as often as you like and it only spends model tokens on
 documents that actually changed.
 
+Linux cron example — `flock` is Linux-specific; on another scheduler use
+whatever single-instance lock it provides:
+
 ```cron
 0 2 * * * cd /srv/docs && /usr/bin/flock -n /tmp/docparse.lock \
           python pipeline.py documents >> /var/log/docparse.log 2>&1
@@ -160,10 +206,10 @@ failed document is logged and skipped; it does not end the run.
 
 ## Data flow — what leaves your infrastructure
 
-Parsed Markdown and the extraction prompt go to OpenAI. Raw PDF, XLSX,
-DOCX, and PPTX bytes do not — Docling runs locally. That is a materially
-tighter boundary than a hosted parsing service, where the document itself
-is uploaded.
+Parsed Markdown and the extraction prompt go to OpenAI. The raw PDF and
+XLSX bytes do not — Docling runs locally. That is a materially tighter
+boundary than a hosted parsing service, where the document itself is
+uploaded.
 
 It is not the same as nothing leaving. Extracted text can carry everything
 confidential the document contained, so treat the model provider as a

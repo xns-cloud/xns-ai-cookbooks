@@ -56,7 +56,9 @@ from openai import (
 )
 from pydantic import BaseModel
 
-SUFFIXES = (".pdf", ".xlsx", ".docx", ".pptx")
+# Docling reads more formats than this; the recipe documents and tests
+# the two it ships fixtures for.
+SUFFIXES = (".pdf", ".xlsx")
 EXTRACT_MODEL = "gpt-4.1-mini"
 
 # Bump when the schema below changes; bump PROMPT_VERSION when the prompt
