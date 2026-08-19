@@ -56,48 +56,46 @@ CAPTION_PROMPT = (
 )
 
 
-TRANSCRIBE_UPLOAD_LIMIT = 25 * 1024 * 1024  # OpenAI audio endpoint cap
+SEGMENT_SECONDS = 600  # transcription segment length
 
 
 def transcribe(blob, cache, client) -> str:
     """Speech-to-text for one media object, cached by ETag + model.
 
-    The transcription endpoint caps uploads at 25 MB, so anything larger —
-    every real video — has its audio track extracted and compressed with
-    ffmpeg (mono, 32 kbps MP3: about 14 MB per hour) before upload."""
+    The transcription endpoint has two ceilings: 25 MB per upload, and an
+    audio-token context that caps out around 25 minutes on the
+    gpt-4o-transcribe family (whisper-1 took longer files; its successors
+    do not).  So every object goes through one path: ffmpeg extracts the
+    audio track compressed (mono, 32 kbps MP3) and splits it into
+    10-minute segments, each transcribed separately and joined."""
     key = f"{blob.metadata['etag']}.{TRANSCRIBE_MODEL}"
     (cached,) = cache.mget([key])
     if cached is not None:
         print(f"  {blob.metadata['key']}: transcript cache hit")
         return cached.decode("utf-8")
 
-    name = Path(blob.metadata["key"]).name
-    payload = blob.as_bytes()
-    if len(payload) > TRANSCRIBE_UPLOAD_LIMIT:
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / name
-            src.write_bytes(payload)
-            audio = Path(tmp) / "audio.mp3"
-            subprocess.run(
-                ["ffmpeg", "-loglevel", "error", "-i", str(src),
-                 "-vn", "-ac", "1", "-b:a", "32k", str(audio)],
-                check=True,
+    parts = []
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / Path(blob.metadata["key"]).name
+        src.write_bytes(blob.as_bytes())
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-i", str(src),
+             "-vn", "-ac", "1", "-b:a", "32k",
+             "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
+             str(Path(tmp) / "seg_%03d.mp3")],
+            check=True,
+        )
+        for seg in sorted(Path(tmp).glob("seg_*.mp3")):
+            result = client.audio.transcriptions.create(
+                model=TRANSCRIBE_MODEL,
+                file=(seg.name, seg.read_bytes()),
             )
-            payload = audio.read_bytes()
-            name = audio.name
-        if len(payload) > TRANSCRIBE_UPLOAD_LIMIT:
-            raise ValueError(
-                f"{blob.metadata['key']}: audio track is still over 25 MB "
-                f"after compression — split it into segments first."
-            )
-
-    result = client.audio.transcriptions.create(
-        model=TRANSCRIBE_MODEL,
-        file=(name, payload),
-    )
-    cache.mset([(key, result.text.encode("utf-8"))])
-    print(f"  {blob.metadata['key']}: transcribed ({len(result.text)} chars)")
-    return result.text
+            parts.append(result.text.strip())
+    text = " ".join(parts)
+    cache.mset([(key, text.encode("utf-8"))])
+    print(f"  {blob.metadata['key']}: transcribed "
+          f"({len(parts)} segment(s), {len(text)} chars)")
+    return text
 
 
 def caption_frames(blob, cache, client) -> list[str]:
