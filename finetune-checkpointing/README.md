@@ -1,7 +1,7 @@
 # Resume Fine-Tuning After Preemption with XNS Checkpoints
 
 A GPU worker can disappear halfway through a fine-tune. This recipe saves
-each completed checkpoint locally, copies it to an XNS bucket, and lets a
+each completed checkpoint locally, uploads it to an XNS bucket, and lets a
 new worker download the newest **complete** checkpoint before calling
 `Trainer.train(resume_from_checkpoint=...)`.
 
@@ -23,8 +23,9 @@ recipe:
   name: finetune-checkpointing
   mode: single-writer-single-process
   durable_store: xns_s3_bucket
-  checkpoint_complete_when: MANIFEST.json exists
-  resume_selection: highest numeric step with a valid manifest
+  checkpoint_candidate_when: MANIFEST.json exists
+  checkpoint_usable_when: all manifest-listed files download and pass verification
+  resume_selection: highest numeric usable step
   verification:
     per_object: S3 checksum on upload
     per_checkpoint: manifest whole-file SHA-256 after download
@@ -57,7 +58,7 @@ design — see [Scale](#scale).
    │  checkpoints/<run-id>/step-000500/             │
    │    the files your trainer wrote  ·             │
    │    MANIFEST.json  (uploaded last)              │
-   │  (S3 API — no per-read charge)                 │
+   │  (S3 API — no XNS storage-side per-read charge)│
    └────────┬──────────────────────────▲────────────┘
             │ pull newest complete      │ multipart push after
             │ checkpoint on start       │ each local save
@@ -72,12 +73,12 @@ design — see [Scale](#scale).
                 prefix and continues from step N
 ```
 
-| Situation | What gets pulled | What it costs |
+| Situation | What gets pulled | What still costs |
 |---|---|---|
-| Preempted mid-run | Newest complete checkpoint | GPU time on the new box; no storage-side read charge |
+| Preempted mid-run | Newest complete checkpoint | GPU time, stored capacity, and transfer time; no XNS storage-side per-read charge |
 | Moving to a bigger GPU | Same | Same |
-| Re-running eval on an old checkpoint | That step's prefix | GPU time only |
-| Sharing weights with a teammate | Whatever they select | Their compute only |
+| Re-running eval on an old checkpoint | Selected step prefix | GPU time and transfer time; no XNS storage-side per-read charge |
+| Sharing weights with a teammate | Selected prefix | Their compute and transfer time; no XNS storage-side per-read charge |
 
 ## Quickstart
 
@@ -129,7 +130,9 @@ checkpoints/<run-id>/step-<zero-padded-6>/MANIFEST.json
 Steps are zero-padded so lexicographic listing order matches numeric
 order.
 
-**A checkpoint is complete only when `MANIFEST.json` exists.** The
+**A checkpoint becomes a recovery candidate when `MANIFEST.json` exists.
+It is usable only after every file named in that manifest downloads and
+passes verification.** The
 manifest is uploaded *last*, after every other file in the prefix. An
 upload interrupted partway leaves a prefix with no manifest, and resume
 ignores it. Listing a prefix is not sufficient evidence that a checkpoint
@@ -155,9 +158,9 @@ Both are used here, and they answer different questions.
 **Per object,** files upload with `ChecksumAlgorithm="SHA256"`, so the
 gateway validates each object in transit. On a multipart upload the value
 S3 returns is a *composite* — a checksum of the part checksums, with a
-`-N` suffix. It will never equal a local `sha256sum` of the same file.
-That mismatch is the most common misread of S3 checksums; it is not
-corruption. (Also don't depend on `head_object` reporting `PartsCount` —
+`-N` suffix. A multipart composite checksum will not equal a local
+whole-file `sha256sum` of the same file. That mismatch is not corruption.
+(Also don't depend on `head_object` reporting `PartsCount` —
 it can come back empty; the part count is legible from the `-N` suffix.)
 
 **Per checkpoint,** `MANIFEST.json` records each file's size and
@@ -192,16 +195,30 @@ class XNSCheckpointCallback(TrainerCallback):
 trainer = Trainer(..., callbacks=[XNSCheckpointCallback("checkpoints", run_id)])
 ```
 
+In this starter implementation, an upload failure fails the save callback
+rather than silently continuing with an unprotected checkpoint. Production
+jobs should add retry policy, timeout handling, and alerting appropriate to
+their preemption risk.
+
 The upload is synchronous, so it extends the time each save takes. On
 multi-GB checkpoints over a slow link that is significant — measure it
-before deciding your `save_steps`, and consider uploading in a background
-thread if save latency starts to hurt throughput.
+before deciding your `save_steps`. A background uploader can reduce save
+latency, but it needs explicit queueing, retry behavior, and the same
+manifest-last completion rule: nothing may treat an upload as complete
+until the manifest has been written. Treat it as a production extension,
+not a drop-in change to this starter recipe.
 
-To start a worker, pull before training:
+To start a worker, pull before training. `pull` prints the directory it
+verified:
 
 ```bash
-python checkpoint.py pull --run-id $RUN_ID --dest ./resume
-# then: trainer.train(resume_from_checkpoint="./resume/step-001500")
+python checkpoint.py pull --run-id "$RUN_ID" --dest ./resume
+# prints: resume_from_checkpoint=resume/step-001500
+```
+
+```python
+resume_dir = "resume/step-001500"  # the path printed by `checkpoint.py pull`
+trainer.train(resume_from_checkpoint=resume_dir)
 ```
 
 **Optional fast path** — for cluster boot scripts, `s5cmd` moves bulk data
@@ -209,20 +226,30 @@ with more parallelism than a single-threaded copy. Verified working
 against the XNS gateway (upload, wildcard download, byte-identical
 round-trip) with s5cmd 2.3.0:
 
+`s5cmd` does not read `~/.xns/credentials`; it uses the standard AWS
+credential chain, so it needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+and `AWS_REGION` supplied by your platform's secret manager.
+
 ```bash
-export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
+# Load the scoped credentials using your environment's secret-injection
+# method. Do not paste credentials into scripts or commit them to source
+# control.
+
 s5cmd --endpoint-url http://localhost:9000 \
       cp "s3://checkpoints/$RUN_ID/step-001500/*" ./resume/
 ```
+
+Note that this path copies bytes without the manifest verification `pull`
+performs; verify against `MANIFEST.json` before resuming from it.
 
 Benchmark it against plain boto3 in your own environment before assuming
 it is faster for your file sizes and link.
 
 ## Data flow — what leaves your infrastructure
 
-Nothing goes to a third-party API in this recipe. Weights move between
-your GPU workers and your Relayer, and nowhere else. There is no model
-provider in this pipeline at all.
+This recipe does not send weights to a model-provider API; data flows
+between your workers and your Relayer. There is no model provider in this
+pipeline at all.
 
 The exposure that does exist is the worker. On a rented marketplace GPU,
 your weights and your XNS credentials sit on hardware you do not control.
@@ -241,7 +268,8 @@ define.
 
 ## MCP config
 
-To let an AI assistant set up the Relayer and inspect runs:
+To let an AI assistant authenticate through the XNS Relayer MCP
+integration and inspect checkpoint runs:
 
 ```json
 {
@@ -255,7 +283,8 @@ To let an AI assistant set up the Relayer and inspect runs:
 ```
 
 It authenticates via OIDC and writes `~/.xns/credentials`, which
-`checkpoint.py` reads.
+`checkpoint.py` reads. The assistant should create or inspect only the
+bucket and prefixes authorized by the credentials available to the Relayer.
 
 ## Limitations
 
@@ -309,7 +338,8 @@ It authenticates via OIDC and writes `~/.xns/credentials`, which
 - **Bucket versioning** on the checkpoints bucket, so an overwritten
   pointer object stays recoverable. Supported by the gateway; think
   through retention before enabling it.
-- **Multi-provider training.** The same bucket serves workers anywhere,
-  which is where the absence of a per-read charge stops being an
-  accounting detail. Transfer time still depends on bandwidth.
+- **Multi-provider training.** Workers that can reach the Relayer and
+  authenticate to the bucket can recover from the same checkpoint prefix,
+  which is where the absence of a storage-side per-read charge stops being
+  an accounting detail. Transfer time still depends on bandwidth.
 - **Distributed checkpointing** for sharded multi-node runs.
