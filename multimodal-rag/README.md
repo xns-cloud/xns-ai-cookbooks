@@ -167,8 +167,12 @@ Starter-recipe boundaries, stated so you don't discover them in production:
 - **Single-process, in-memory index.** No concurrency, no restart recovery,
   no multi-user story. Fine for a workstation; a service needs a real
   vector store.
-- **Happy path only.** No handling for oversized files, unsupported codecs,
-  API rate limits, or partial failures.
+- **Happy path only.** Audio over the transcription API's 25 MB cap is
+  extracted and compressed with ffmpeg automatically (about 14 MB per hour
+  at mono 32 kbps), but multi-hour recordings that still exceed the cap
+  need segmenting, and there is no handling for unsupported codecs, API
+  rate limits, or partial failures. Whole objects are also held in memory
+  during processing — a 3 GB video needs 3 GB of RAM.
 
 ## What to try next
 

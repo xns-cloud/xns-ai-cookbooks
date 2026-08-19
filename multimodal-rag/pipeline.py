@@ -56,16 +56,44 @@ CAPTION_PROMPT = (
 )
 
 
+TRANSCRIBE_UPLOAD_LIMIT = 25 * 1024 * 1024  # OpenAI audio endpoint cap
+
+
 def transcribe(blob, cache, client) -> str:
-    """Speech-to-text for one media object, cached by ETag + model."""
+    """Speech-to-text for one media object, cached by ETag + model.
+
+    The transcription endpoint caps uploads at 25 MB, so anything larger —
+    every real video — has its audio track extracted and compressed with
+    ffmpeg (mono, 32 kbps MP3: about 14 MB per hour) before upload."""
     key = f"{blob.metadata['etag']}.{TRANSCRIBE_MODEL}"
     (cached,) = cache.mget([key])
     if cached is not None:
         print(f"  {blob.metadata['key']}: transcript cache hit")
         return cached.decode("utf-8")
+
+    name = Path(blob.metadata["key"]).name
+    payload = blob.as_bytes()
+    if len(payload) > TRANSCRIBE_UPLOAD_LIMIT:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / name
+            src.write_bytes(payload)
+            audio = Path(tmp) / "audio.mp3"
+            subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-i", str(src),
+                 "-vn", "-ac", "1", "-b:a", "32k", str(audio)],
+                check=True,
+            )
+            payload = audio.read_bytes()
+            name = audio.name
+        if len(payload) > TRANSCRIBE_UPLOAD_LIMIT:
+            raise ValueError(
+                f"{blob.metadata['key']}: audio track is still over 25 MB "
+                f"after compression — split it into segments first."
+            )
+
     result = client.audio.transcriptions.create(
         model=TRANSCRIBE_MODEL,
-        file=(Path(blob.path).name, blob.as_bytes()),
+        file=(name, payload),
     )
     cache.mset([(key, result.text.encode("utf-8"))])
     print(f"  {blob.metadata['key']}: transcribed ({len(result.text)} chars)")
