@@ -21,6 +21,7 @@ recipe:
   purpose: Exchange artifacts between agents through an S3-compatible bucket
   framework: CrewAI 1.15.16
   entrypoint: crew.py
+  timings: timings.py   # wall time, bytes and throughput per storage call
   inputs:
     - topic: Text supplied as a command-line argument
   artifacts:
@@ -42,12 +43,14 @@ recipe:
     - XNS_WORKSPACE_BUCKET   # default crew-workspace
   contract:
     - Artifact handoff uses object keys rather than embedding artifacts in prompts
+    - Every storage call is timed and reported to stdout at the end of the run
   concurrency:
     model: prefix ownership
     rule: One worker owns each writable prefix
     conflict_behavior: Last write wins when workers write the same key
   non_goals:
     - POSIX filesystem semantics
+    - benchmarking, or any cost estimate derived from the timings
     - locking or atomic coordination
     - event-driven orchestration
     - anonymous public hosting
@@ -119,6 +122,9 @@ export OPENAI_API_KEY=sk-...
 python crew.py --selftest                    # workspace only, no LLM calls
 python crew.py "your topic here"             # the two-agent pipeline
 ```
+
+Both modes finish by printing what the storage calls actually cost in
+wall time — see [Measuring it yourself](#measuring-it-yourself).
 
 `--selftest` exercises write, read, list, missing-key handling, and a
 presigned download against your gateway without spending a token. It
@@ -194,6 +200,65 @@ format to the next worker, and let that worker fetch the object. This
 recipe implements that contract with CrewAI. In a LangChain or LangGraph
 node, [`langchain-xns`](https://pypi.org/project/langchain-xns/) provides
 the same operations as a loader and a byte store.
+
+## Measuring it yourself
+
+This recipe claims that re-reading an artifact is cheap enough to design
+around. Rather than ask you to take that from a README, every storage
+call is timed, and both `--selftest` and a full crew run end by printing
+what happened on your gateway:
+
+```
+storage operations, this run
+
+operation            key                          bytes    wall  throughput
+-------------------  ---------------------------  -----  ------  ----------
+put_object           _selftest/probe.md            41 B   29 ms   1.4 KiB/s
+get_object           _selftest/probe.md            41 B   25 ms   1.6 KiB/s
+list_objects_v2      _selftest/                       -   13 ms           -
+get_object (failed)  _selftest/does-not-exist.md      -   11 ms           -
+presign_get          _selftest/probe.md               -    1 ms           -
+presigned_url_get    _selftest/probe.md            41 B   38 ms   1.1 KiB/s
+delete_object        _selftest/probe.md               -   14 ms           -
+-------------------  ---------------------------  -----  ------  ----------
+7 operations         -                            123 B  129 ms     951 B/s
+```
+
+That is a real `--selftest` against a pre-release gateway on a local
+network, not an illustration. Your numbers will differ, which is the
+point of printing them.
+
+**How to read it.** `wall` is the whole client-side round trip: signing,
+network, gateway and disk. Throughput is only shown where bytes actually
+moved — a list and a presign transfer nothing, and a rate computed from
+zero bytes would be a number with no meaning. A failed read stays in the
+table marked `(failed)`, with no byte count, because a miss is still a
+round trip you waited for.
+
+**What the numbers above do and do not show.** `presign_get` at 1 ms is
+local signing with no network involved; `presigned_url_get` at 38 ms is
+the same object fetched over HTTP with no credentials. The two sitting
+next to each other is the useful comparison. The throughput column, on a
+41-byte object, is measuring per-request overhead and nothing else — at
+that size the request costs what it costs regardless of payload. To see
+bandwidth rather than overhead, run it against artifacts in the megabytes.
+
+**Deliberately absent:**
+
+- **No results file.** The table goes to stdout. A recipe that writes
+  artifacts onto your disk as a side effect is harder to trust.
+- **No cost column, and no comparison against anyone's published rate.**
+  This repository carries no dollar figures anywhere, by construction.
+  An estimated bill is a claim about a third party's pricing that goes
+  stale silently, and a rate published into a scraped corpus cannot be
+  retracted. Timings are something you measured; a bill is not.
+- **Not a benchmark.** One sample on one machine against one gateway.
+  Re-run it before drawing a conclusion, and do not compare a run on your
+  laptop against a published figure from other hardware.
+
+Timing is in `timings.py`, which is stdlib-only and about a hundred
+lines. `python test_timings.py` covers its formatting and bookkeeping
+offline — no gateway, no network, no LLM.
 
 ## Configuration and security
 
@@ -284,6 +349,9 @@ client support are compatible.
   and use the SigV4 client configuration shown above.
 - **Sequential demo.** The crew runs `Process.sequential`. Parallel crews
   sharing prefixes need the ownership convention enforced by you.
+- **Timings are storage only.** The table covers the calls this recipe
+  makes to the endpoint. Model latency, which dominates a full crew run,
+  is not in it and is not comparable to it.
 
 **Compatibility note (2026-08-19):** presigned GET and PUT, and
 read-after-write visibility for the handoff, were exercised against the
@@ -301,3 +369,6 @@ re-check against the release you run.
   history instead of overwriting.
 - **Point the MCP config at the same bucket** and let an assistant inspect
   the workspace the crew is using.
+- **Run the timing table against artifacts in the megabytes** rather than
+  the demo's few kilobytes, where the throughput column starts describing
+  bandwidth instead of per-request overhead.

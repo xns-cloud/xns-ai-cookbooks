@@ -22,3 +22,18 @@ jobs:
       - name: Offline tests
         working-directory: agentic-doc-parsing
         run: python test_pipeline.py
+
+  agent-workspace-timings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The timing harness is stdlib-only on purpose, so this job installs
+      # nothing. It does not touch a gateway; it checks the formatting and
+      # bookkeeping the printed table depends on.
+      - name: Offline timing tests
+        working-directory: agent-workspace
+        run: python test_timings.py
