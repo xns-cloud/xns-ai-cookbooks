@@ -176,10 +176,43 @@ collection 'corpus' not present -- restoring from the bucket
 restored corpus-…snapshot from s3://cookbook-index-check/index/… -> 3 points (0.8s)
 ```
 
+The same cycle on the default embedding path, `text-embedding-3-small`,
+including the generated answer:
+
+```
+$ python index.py ingest cookbook-index-check
+embeddings: text-embedding-3-small
+3 document(s) from s3://cookbook-index-check
+3 chunks
+embedded in 2.7s
+upserted 3 points into 'corpus'
+snapshot corpus-7467990003043846-2026-09-02-13-23-47.snapshot -> s3://…/index/corpus-7467990003043846-2026-09-02-13-23-47.snapshot (176,128 bytes, 3 points, 0.3s)
+
+$ python index.py cold-start cookbook-index-check "what makes the index survive losing the disk?"
+deleted local collection 'corpus' -- Qdrant is now cold
+restored corpus-7467990003043846-2026-09-02-13-23-47.snapshot from s3://…/index/corpus-… -> 3 points (0.3s)
+embeddings: text-embedding-3-small
+
+Q: what makes the index survive losing the disk?
+
+retrieved 3 chunks:
+  [0.411] docs/snapshots.md: # Snapshots  A Qdrant snapshot is a point-in-time copy of a collection, written to the node's own disk. Downlo…
+  [0.315] docs/cold-start.md: # Cold start  A cold start is a process, container, or machine that has never seen the index. It restores the …
+  [0.284] docs/embeddings.md: # Embeddings and cost  Embedding a corpus is the expensive step in a retrieval pipeline. Every re-run that reb…
+
+A: Downloading a Qdrant snapshot and storing the file elsewhere makes the index survive the loss of that disk.
+```
+
+The 2.7 seconds of embedding against 0.3 seconds of snapshot round trip
+is the ratio the recipe exists for, and it is the ratio that grows with
+the corpus: embedding scales with how much text you have, while the
+restore scales with the index and happens once per cold start rather than
+once per run.
+
 Two things in that output are worth reading carefully. The snapshot is
 roughly 150 KB for 3 points: a Qdrant snapshot carries the collection's
 segment structure, not just its vectors, so it has a floor that has
-nothing to do with corpus size — and it varied between 100 KB and 155 KB
+nothing to do with corpus size — and it varied between 100 KB and 176 KB
 across runs of the same three documents. Do not extrapolate per-point
 storage from a small run, and do not treat the size as stable.
 
