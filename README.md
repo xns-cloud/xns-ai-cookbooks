@@ -10,7 +10,9 @@ workflows where repeated reads dominate the storage bill.
 
 Each recipe states its limitations explicitly. These are starter recipes —
 single-process, happy-path — and each one says exactly where that stops
-being enough.
+being enough. The first four build their index in memory and lose it at
+exit; [Persistent Index](persistent-index/) is the one that does not, and
+is where to go when re-embedding on every run stops being acceptable.
 
 ## Recipes
 
@@ -20,6 +22,7 @@ being enough.
 | [Agentic Document Parsing](agentic-doc-parsing/) | PDFs/spreadsheets → local Docling parse → structured JSON, cached per document | Ready |
 | [Fine-Tune Checkpointing](finetune-checkpointing/) | Model weights ↔ GPU clusters via S3 multipart | Ready |
 | [Agent Workspace](agent-workspace/) | CrewAI agents exchanging artifacts through a shared bucket | Ready |
+| [Persistent Index](persistent-index/) | Qdrant collection snapshotted to XNS; a cold container restores and queries without re-embedding | Ready |
 
 Each recipe includes three things:
 

@@ -37,3 +37,21 @@ jobs:
       - name: Offline timing tests
         working-directory: agent-workspace
         run: python test_timings.py
+
+  persistent-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The offline tests never reach Qdrant or a gateway, but importing
+      # index.py pulls in its client libraries, so they are installed.
+      # The OpenAI extras are not -- that path is not exercised here.
+      - name: Install test dependencies
+        run: pip install langchain-xns langchain-text-splitters "qdrant-client>=1.19,<2" requests
+
+      - name: Offline tests
+        working-directory: persistent-index
+        run: python test_index.py
