@@ -29,6 +29,10 @@ Usage:
 
 Credentials resolve from ~/.xns/credentials, or from XNS_ENDPOINT /
 XNS_ACCESS_KEY_ID / XNS_SECRET_ACCESS_KEY.
+
+Every storage call is timed. Both modes finish by printing a table of
+wall time, bytes and throughput per operation, measured against your own
+gateway — see timings.py.
 """
 
 import json
@@ -43,6 +47,8 @@ from botocore.exceptions import ClientError
 from crewai import Agent, Crew, Process, Task
 from crewai.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
+
+from timings import Timings
 
 BUCKET = os.environ.get("XNS_WORKSPACE_BUCKET", "crew-workspace")
 MODEL = os.environ.get("CREW_MODEL", "gpt-4.1-mini")
@@ -86,6 +92,9 @@ class Workspace:
     def __init__(self, bucket: str = BUCKET):
         cfg = resolve_config()
         self.bucket = bucket
+        # Every storage call below records into this. Printing it is the
+        # caller's job, so a library user can ignore it entirely.
+        self.timings = Timings()
         # Path-style addressing and an explicit SigV4 signer. The signer
         # matters for presigned URLs: botocore still presigns with SigV2 by
         # default, and this gateway is SigV4-only, so a default client
@@ -106,26 +115,46 @@ class Workspace:
             pass  # already exists
 
     def write(self, key: str, content: str) -> str:
-        self.s3.put_object(Bucket=self.bucket, Key=key, Body=content.encode("utf-8"))
-        return f"wrote {len(content)} bytes to {key}"
+        body = content.encode("utf-8")
+        with self.timings.record("put_object", key) as m:
+            m.bytes = len(body)
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=body)
+        return f"wrote {len(body)} bytes to {key}"
 
     def read(self, key: str) -> str:
-        try:
-            return self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read().decode("utf-8")
-        except ClientError as exc:
-            # Agents recover better from a sentence than from a traceback.
-            return f"ERROR: could not read {key}: {exc.response['Error'].get('Code', 'Unknown')}"
+        with self.timings.record("get_object", key) as m:
+            try:
+                body = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+            except ClientError as exc:
+                # Agents recover better from a sentence than from a traceback.
+                # A miss is still a round trip, so it stays in the table --
+                # marked failed, with no byte count to imply a transfer.
+                m.failed = True
+                return (
+                    f"ERROR: could not read {key}: "
+                    f"{exc.response['Error'].get('Code', 'Unknown')}"
+                )
+            m.bytes = len(body)
+        return body.decode("utf-8")
 
     def list(self, prefix: str = "") -> list[str]:
         keys, paginator = [], self.s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        # Timed as one operation even when it pages, because that is what
+        # the caller waited for.
+        with self.timings.record("list_objects_v2", prefix or "(all)"):
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                keys.extend(obj["Key"] for obj in page.get("Contents", []))
         return keys
 
     def share_link(self, key: str, seconds: int = 3600) -> str:
-        return self.s3.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=seconds
-        )
+        # Local signing, no network. It is in the table so the difference
+        # between signing and transferring is visible rather than assumed.
+        with self.timings.record("presign_get", key):
+            return self.s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=seconds,
+            )
 
 
 class WriteInput(BaseModel):
@@ -257,13 +286,19 @@ def selftest(workspace: Workspace) -> None:
     link = workspace.share_link(probe, seconds=60)
     import urllib.request
 
-    fetched = urllib.request.urlopen(link, timeout=15).read().decode("utf-8")
-    assert fetched == body, "presigned URL returned different content"
+    # An anonymous GET over plain HTTP -- no signing, no boto3. Timed
+    # alongside the signed calls so the two are comparable.
+    with workspace.timings.record("presigned_url_get", probe) as m:
+        raw = urllib.request.urlopen(link, timeout=15).read()
+        m.bytes = len(raw)
+    assert raw.decode("utf-8") == body, "presigned URL returned different content"
     print("presigned GET works and returns the same bytes")
 
-    workspace.s3.delete_object(Bucket=workspace.bucket, Key=probe)
+    with workspace.timings.record("delete_object", probe):
+        workspace.s3.delete_object(Bucket=workspace.bucket, Key=probe)
     print("cleaned up _selftest/ — work/ and outputs/ untouched")
     print("\nselftest passed — workspace is reachable and behaves as documented")
+    print(workspace.timings.table())
 
 
 def main() -> None:
@@ -287,6 +322,9 @@ def main() -> None:
         f"\nfetch it:  aws s3 cp s3://{workspace.bucket}/{REPORT_KEY} - "
         f"--endpoint-url {resolve_config()['endpoint']}"
     )
+    # Storage only. Model latency is the larger number in this run and it
+    # is not on this table -- see the recipe README.
+    print(workspace.timings.table())
 
 
 if __name__ == "__main__":
