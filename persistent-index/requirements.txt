@@ -1,0 +1,9 @@
+langchain-xns>=0.1.0
+langchain-text-splitters>=0.3
+qdrant-client>=1.19,<2
+requests>=2.31
+
+# Only needed for the default (openai) embedding path. XNS_EMBEDDINGS=hashing
+# runs the whole storage cycle without them.
+langchain-openai>=0.3
+langchain-classic>=0.3
